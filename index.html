@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spotify API Tester</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#090b0e;color:#fff;font-family:Arial,sans-serif}.wrap{max-width:900px;margin:auto;padding:18px}
+.card{background:#15191e;border:1px solid #29313a;border-radius:16px;padding:18px;margin:14px 0}h1{margin:0 0 5px}h3{margin:0 0 12px}
+label{display:block;color:#a5adb8;font-size:13px;margin:10px 0 6px}input,select{width:100%;padding:12px;border-radius:9px;border:1px solid #303943;background:#0d1014;color:#fff}
+button{padding:12px 16px;border:0;border-radius:10px;background:#1ed760;color:#061008;font-weight:bold;cursor:pointer}button.secondary{background:#242b33;color:#fff}
+.row{display:flex;gap:10px}.row>*{flex:1}.status{padding:12px;border-radius:10px;background:#0d1014;color:#aab3be;margin-top:12px;white-space:pre-wrap;word-break:break-word}.ok{color:#79f3a0}.err{color:#ff8585}
+.small{font-size:12px;color:#929ca8;line-height:1.5}.log{height:180px;overflow:auto;background:#050608;padding:10px;border-radius:10px;color:#9de8b2;font:12px monospace;white-space:pre-wrap}
+.results{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;margin-top:12px}.track{display:flex;gap:10px;background:#0e1216;border:1px solid #29313a;padding:10px;border-radius:12px}.cover{width:60px;height:60px;object-fit:cover;border-radius:7px}.info{min-width:0}.name{font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.artist{font-size:12px;color:#9da6b2;margin:4px 0 8px}
+.now{display:flex;gap:14px;align-items:center}.now img{width:80px;height:80px;border-radius:10px;object-fit:cover}.nowinfo{flex:1}.title{font-weight:bold;font-size:18px}.muted{color:#9da6b2}.controls{display:flex;gap:8px;margin-top:10px}.controls button{border-radius:50%;width:44px;height:44px;padding:0}
+@media(max-width:600px){.row{flex-direction:column}.now{align-items:flex-start}.now{flex-wrap:wrap}.nowinfo{min-width:calc(100% - 95px)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>🎵 Spotify API Tester</h1>
+<div class="small">Authorization Code + PKCE • Vercel HTTPS • No Client Secret</div>
+
+<div class="card">
+<h3>Spotify Configuration</h3>
+<label>Client ID</label>
+<input id="clientId" value="2fbec57f845a4562bb4458568f76967e" placeholder="Spotify Client ID">
+<label>Redirect URI</label>
+<input id="redirectUri" value="https://spotify-tester-rho.vercel.app/" readonly>
+<div class="small" style="margin-top:8px">This exact URI must be added in Spotify Developer Dashboard → your app → Settings → Redirect URIs.</div>
+</div>
+
+<div class="card">
+<h3>1. Login</h3>
+<div class="row">
+<button id="login" type="button">🔐 Login with Spotify</button>
+<button class="secondary" id="test" type="button">Test Configuration</button>
+</div>
+<div id="status" class="status">Ready.</div>
+</div>
+
+<div class="card">
+<h3>2. Search</h3>
+<div class="row">
+<input id="query" placeholder="Search a song or artist">
+<button id="search" type="button">Search</button>
+</div>
+<div id="results" class="results"></div>
+</div>
+
+<div class="card">
+<h3>3. Playback</h3>
+<div class="now">
+<img id="cover" alt="">
+<div class="nowinfo">
+<div id="title" class="title">Nothing playing</div>
+<div id="artist" class="muted">Login first.</div>
+<input id="progress" type="range" min="0" max="1000" value="0" style="margin-top:12px">
+</div>
+</div>
+<div class="controls">
+<button class="secondary" id="prev">⏮</button>
+<button id="play">▶</button>
+<button class="secondary" id="next">⏭</button>
+</div>
+</div>
+
+<div class="card">
+<h3>4. Device</h3>
+<div class="row"><select id="device"></select><button class="secondary" id="devices">Refresh</button></div>
+</div>
+
+<div class="card"><h3>Debug Log</h3><div id="log" class="log">Page loaded.</div></div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+const API="https://api.spotify.com/v1";
+const AUTH="https://accounts.spotify.com";
+const REDIRECT="https://spotify-tester-rho.vercel.app/";
+const SCOPES="user-read-private user-read-email user-read-playback-state user-modify-playback-state user-read-currently-playing";
+
+let accessToken=localStorage.getItem("sp_access_token")||"";
+let refreshToken=localStorage.getItem("sp_refresh_token")||"";
+let expiresAt=Number(localStorage.getItem("sp_expires_at")||0);
+let codeVerifier="";
+let duration=0,progress=0,playing=false,timer;
+
+const $=id=>document.getElementById(id);
+function log(x){$("log").textContent=new Date().toLocaleTimeString()+"  "+x+"\\n"+$("log").textContent}
+function status(x,c){$("status").className="status "+(c||"");$("status").textContent=x;log(x)}
+function esc(x){return String(x||"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[m]))}
+
+function randomVerifier(){
+ const a=new Uint8Array(64);crypto.getRandomValues(a);
+ return Array.from(a,x=>x.toString(16).padStart(2,"0")).join("");
+}
+async function sha256(s){return crypto.subtle.digest("SHA-256",new TextEncoder().encode(s))}
+function b64url(buf){
+ let s="";for(const b of new Uint8Array(buf))s+=String.fromCharCode(b);
+ return btoa(s).replace(/\+/g,"-").replace(/\//g,"_").replace(/=/g,"");
+}
+
+async function startLogin(){
+ try{
+   const clientId=$("clientId").value.trim();
+   if(!clientId){status("❌ Client ID is empty.","err");return}
+   if(!window.isSecureContext){status("❌ This page is not a secure context. Open the Vercel HTTPS URL.","err");return}
+   if(!window.crypto || !crypto.subtle){status("❌ Web Crypto is unavailable in this browser.","err");return}
+
+   codeVerifier=randomVerifier();
+   localStorage.setItem("sp_code_verifier",codeVerifier);
+   const digest=await sha256(codeVerifier);
+   const challenge=b64url(digest);
+   const state=randomVerifier().slice(0,32);
+   localStorage.setItem("sp_state",state);
+   localStorage.setItem("sp_client_id",clientId);
+
+   const u=new URL(AUTH+"/authorize");
+   u.searchParams.set("client_id",clientId);
+   u.searchParams.set("response_type","code");
+   u.searchParams.set("redirect_uri",REDIRECT);
+   u.searchParams.set("scope",SCOPES);
+   u.searchParams.set("code_challenge_method","S256");
+   u.searchParams.set("code_challenge",challenge);
+   u.searchParams.set("state",state);
+   u.searchParams.set("show_dialog","true");
+
+   status("Opening Spotify login...\\nIf nothing happens, use the button below:\\n"+u.toString(),"ok");
+   setTimeout(()=>{window.location.assign(u.href)},100);
+ }catch(e){
+   status("❌ Login JavaScript error:\\n"+e.name+": "+e.message,"err");
+ }
+}
+
+$("login").addEventListener("click",startLogin);
+$("test").addEventListener("click",()=>{
+ status(
+ "Client ID: "+($("clientId").value.trim()?"✓ present":"❌ missing")+
+ "\\nRedirect URI: "+REDIRECT+
+ "\\nSecure context: "+(window.isSecureContext?"✓ yes":"❌ no")+
+ "\\nWeb Crypto: "+(window.crypto?.subtle?"✓ yes":"❌ no"),
+ $("clientId").value.trim()&&window.isSecureContext&&window.crypto?.subtle?"ok":"err"
+ );
+});
+
+async function callback(){
+ const p=new URLSearchParams(location.search);
+ const code=p.get("code"),state=p.get("state"),error=p.get("error");
+ if(!code&&!error)return;
+ if(error){status("Spotify returned error: "+error,"err");return}
+ if(state!==localStorage.getItem("sp_state")){status("❌ State mismatch. Start login again.","err");return}
+ try{
+   const verifier=localStorage.getItem("sp_code_verifier");
+   const clientId=localStorage.getItem("sp_client_id")||$("clientId").value.trim();
+   const body=new URLSearchParams();
+   body.set("client_id",clientId);body.set("grant_type","authorization_code");
+   body.set("code",code);body.set("redirect_uri",REDIRECT);body.set("code_verifier",verifier);
+   const r=await fetch(AUTH+"/api/token",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body});
+   const d=await r.json();
+   if(!r.ok)throw new Error(d.error_description||d.error||"Token exchange failed");
+   accessToken=d.access_token;refreshToken=d.refresh_token||refreshToken;
+   expiresAt=Date.now()+((d.expires_in||3600)-60)*1000;
+   localStorage.setItem("sp_access_token",accessToken);
+   localStorage.setItem("sp_refresh_token",refreshToken);
+   localStorage.setItem("sp_expires_at",expiresAt);
+   history.replaceState({},document.title,REDIRECT);
+   status("✓ Spotify login successful!","ok");
+   await loadMe();await loadDevices();await playback();
+ }catch(e){status("❌ Token exchange error:\\n"+e.message,"err")}
+}
+
+async function refresh(){
+ const clientId=localStorage.getItem("sp_client_id")||$("clientId").value.trim();
+ const body=new URLSearchParams({client_id:clientId,grant_type:"refresh_token",refresh_token:refreshToken});
+ const r=await fetch(AUTH+"/api/token",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body});
+ const d=await r.json();if(!r.ok)throw new Error(d.error_description||d.error);
+ accessToken=d.access_token;refreshToken=d.refresh_token||refreshToken;
+ expiresAt=Date.now()+((d.expires_in||3600)-60)*1000;
+ localStorage.setItem("sp_access_token",accessToken);localStorage.setItem("sp_refresh_token",refreshToken);localStorage.setItem("sp_expires_at",expiresAt);
+}
+async function token(){
+ if(!accessToken)throw new Error("Login first.");
+ if(Date.now()>expiresAt&&refreshToken)await refresh();
+ return accessToken;
+}
+async function api(path,opt={}){
+ const t=await token();
+ const r=await fetch(API+path,{...opt,headers:{Authorization:"Bearer "+t,"Content-Type":"application/json",...(opt.headers||{})}});
+ let d=null;try{d=await r.json()}catch(_){}
+ log((opt.method||"GET")+" "+path+" → "+r.status);
+ if(r.status===401&&refreshToken){await refresh();return api(path,opt)}
+ if(!r.ok)throw new Error(d?.error?.message||"HTTP "+r.status);
+ return d;
+}
+async function loadMe(){const m=await api("/me");status("✓ Logged in as "+(m.display_name||m.id),"ok")}
+async function search(){
+ const q=$("query").value.trim();if(!q)return;
+ try{
+  const d=await api("/search?"+new URLSearchParams({q,type:"track",limit:"12"}));$("results").innerHTML="";
+  d.tracks.items.forEach(t=>{
+   const el=document.createElement("div");el.className="track";
+   const img=t.album.images?.[2]?.url||t.album.images?.[0]?.url||"";
+   el.innerHTML='<img class="cover" src="'+esc(img)+'"><div class="info"><div class="name">'+esc(t.name)+'</div><div class="artist">'+esc(t.artists.map(a=>a.name).join(", "))+'</div><button onclick="window.playTrack('+JSON.stringify(t.uri)+')">▶ Play</button></div>';
+   $("results").appendChild(el);
+  });
+ }catch(e){status("Search error: "+e.message,"err")}
+}
+window.playTrack=async function(uri){
+ try{const id=$("device").value,qs=id?"?device_id="+encodeURIComponent(id):"";await api("/me/player/play"+qs,{method:"PUT",body:JSON.stringify({uris:[uri]})});setTimeout(playback,500)}
+ catch(e){status("Play error: "+e.message,"err")}
+}
+async function playback(){
+ try{
+  const d=await api("/me/player");if(!d||!d.item){$("title").textContent="Nothing playing";return}
+  const t=d.item;duration=t.duration_ms||0;progress=d.progress_ms||0;playing=!!d.is_playing;
+  $("title").textContent=t.name;$("artist").textContent=t.artists?.map(a=>a.name).join(", ")||"";
+  $("cover").src=t.album?.images?.[1]?.url||t.album?.images?.[0]?.url||"";
+  $("play").textContent=playing?"⏸":"▶";$("progress").value=duration?Math.round(progress/duration*1000):0;
+  clearInterval(timer);if(playing)timer=setInterval(()=>{progress+=1000;if(duration)$("progress").value=Math.min(1000,Math.round(progress/duration*1000))},1000);
+ }catch(e){log("Playback: "+e.message)}
+}
+$("search").onclick=search;$("query").onkeydown=e=>{if(e.key==="Enter")search()};
+$("play").onclick=async()=>{try{await api("/me/player/"+(playing?"pause":"play"),{method:"PUT"});setTimeout(playback,400)}catch(e){status(e.message,"err")}};
+$("next").onclick=async()=>{try{await api("/me/player/next",{method:"POST"});setTimeout(playback,400)}catch(e){status(e.message,"err")}};
+$("prev").onclick=async()=>{try{await api("/me/player/previous",{method:"POST"});setTimeout(playback,400)}catch(e){status(e.message,"err")}};
+$("devices").onclick=loadDevices;
+$("progress").onchange=async()=>{try{progress=Math.round(Number($("progress").value)/1000*duration);await api("/me/player/seek?position_ms="+progress,{method:"PUT"})}catch(e){status(e.message,"err")}};
+async function loadDevices(){
+ try{const d=await api("/me/player/devices"),s=$("device");s.innerHTML="";(d.devices||[]).forEach(x=>{const o=document.createElement("option");o.value=x.id;o.textContent=(x.is_active?"● ":"")+x.name+" — "+x.type;if(x.is_active)o.selected=true;s.appendChild(o)});if(!d.devices?.length)s.innerHTML="<option>No active Spotify devices</option>"}
+ catch(e){log("Devices: "+e.message)}
+}
+
+callback().then(()=>{if(accessToken&&!location.search){loadMe().then(loadDevices).then(playback).catch(e=>status(e.message,"err"))}});
+})();
+</script>
+</body>
+</html>
